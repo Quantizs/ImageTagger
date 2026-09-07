@@ -122,6 +122,68 @@ területüket kihagyja. A hibaszámláló és az `objects_with_measurable_area` 
 Objektumok hiányában az átlagok nullák. Váratlan leállás után az annotációk az utolsó
 automatikus mentésig megmaradnak; a statisztika a következő mentéskor frissül.
 
+## Háromszínű keretek és normalizált táblák exportálása
+
+A külön exportáló script csak a legalább egy poligonnal rendelkező képekről készít
+rajzolt másolatot. A kép mellett számozott oldalsávban mutatja a reklámtáblák
+perspektívakorrekcióval szembeforgatott, egységes méretű nézeteit.
+Az eredeti képeket és az annotációkat nem módosítja.
+
+```powershell
+python export_polygons.py "C:\Projects\ImageTagger\budapest_kozut"
+```
+
+Alapértelmezett kimenet: a képmappa `output` almappája. Másik mappa, eltérő
+vonalvastagság és a kivágások magassága is megadható:
+
+```powershell
+python export_polygons.py "C:\Projects\ImageTagger\budapest_kozut" --output "C:\Projects\ImageTagger\rajzolt_kepek"
+python export_polygons.py "C:\Projects\ImageTagger\budapest_kozut" --line-ratio 0.002
+python export_polygons.py "C:\Projects\ImageTagger\budapest_kozut" --crop-height 480
+```
+
+- Minden poligonon egyszerre **belül kék, középen piros, kívül zöld** keret látszik.
+  A három sáv az annotáció határától kifelé épül fel, az objektum belsejét nem tölti ki.
+- **Egy színsáv** vastagsága a rövidebb képoldal **0,3%-a**, egész pixelre kerekítve,
+  minimum 1 pixel. Például 1920×1080 esetén színenként 3 pixel, összesen 9 pixel.
+  A `--line-ratio 0.002` színenként vékonyabb, 0,2%-os vonalat jelent.
+- A képen és az oldalsávon egyező számok kapcsolják össze az objektumokat.
+  A számozás a TXT-fájl sorainak sorrendjét követi, képenként 1-től indul.
+  A script a tábla felett, alatt és mellett több helyet vizsgál, figyelembe véve az összes
+  többi poligont és a már elhelyezett számokat. A legkisebb takarású, közeli helyet
+  választja, és összekötő vonalat húz a táblához. Nagyon zsúfolt képen nem garantálható
+  teljesen takarásmentes számozás; a kép körüli margó is helyet biztosít a jelöléseknek.
+- Az oldalsáv **kandelláber (100 × 140 cm)** vagy **óriásplakát (504 × 238 cm)** típusba
+  sorolja a táblákat. A becslés az eredeti képpixelben mért felső/alsó élek átlagos hosszának
+  és a bal/jobb élek átlagos hosszának arányát hasonlítja a két ismert oldalarányhoz,
+  logaritmikus távolság alapján. Ez a kép síkjában történő elfordulást kezeli,
+  **erős perspektívatorzulásnál azonban tévedhet**. A centiméterértékek a feltételezett
+  típus névleges méretei, nem a fényképből megmért fizikai méretek.
+- A négy sarokból projektív transzformáció készül: TL/TR/BR/BL a kivágás megfelelő
+  sarkaiba kerül. A kivágás az eredeti, feliratok és keretek nélküli képből származik.
+- A kivágások alapértelmezés szerint **320 pixel magasak**: kandellábernél 229 × 320,
+  óriásplakátnál 678 × 320 pixel körüli méret adódik. A `--crop-height` 120–1600 pixel
+  között állítható. A kisebb részleteket felnagyítja; az interpoláció nem állítja vissza
+  a forrásképen hiányzó részleteket. A már nagyobb táblákat az egységes méretre kicsinyíti.
+- A kártyák közös rácson, azonos kivágásmagassággal jelennek meg. Az álló kártya egy,
+  a fekvő három oszlopot foglal. Az oszlopszám a táblák számához és a kép méretéhez igazodik,
+  sok tábla esetén több oszlop/sor készül, egyik kivágást sem hagyja el.
+- A bal oldali fotó az eredeti felbontásában, az annotátor pixelirányában marad;
+  az oldalsáv és a margók miatt a **teljes exportkép nagyobb lesz**.
+  Minden másolat veszteségmentes PNG: például `foto.jpg` → `output/foto.jpg.png`.
+  Az eredeti teljes fájlnév használata kizárja a különböző kiterjesztések névütközését.
+- Az üres vagy hiányzó annotációjú képeket kihagyja. Hibás fájl esetén jelzi a hibát,
+  a többi képet feldolgozza, és nem nulla kilépési kódot ad.
+- Az output mappa legyen üres vagy egy korábbi, ugyanebből a képmappából készült export mappája.
+  Újrafuttatáskor frissíti a másolatokat, és eltávolítja azokat a korábbi exportképeket,
+  amelyekhez már nincs poligon. A saját fájljait a `.polygon_export.json` tartja nyilván;
+  ezt hagyd a mappában. Idegen fájlokat tartalmazó output mappát nem módosít.
+- Ugyanazokat a támogatott képformátumokat és az `annotations/<teljes képfájlnév>.txt`
+  fájlokat használja, mint az annotátor. Almappákat nem jár be, többképes fájlból az első képet exportálja.
+
+A korábbi piros keretes exportok ugyanazzal a paranccsal újragenerálhatók az új megjelenéssel.
+Az export továbbra is csak a Pillow csomagot igényli; nincs szükség OpenCV-re.
+
 ## Ellenőrzés
 
 Tárolás, formátum, területszámítás és mentési hibák tesztjei:
