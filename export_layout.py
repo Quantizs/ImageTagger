@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from functools import lru_cache
 
 from PIL import Image, ImageDraw, ImageFont
+from surface_categories import BoardType, CATEGORIES, classify_board, predict_category
 
 BLUE = (0, 80, 255)
 RED = (255, 30, 35)
@@ -17,19 +17,8 @@ PAPER = "#f0f4f8"
 Point = tuple[float, float]
 
 
-@dataclass(frozen=True)
-class BoardType:
-    name: str
-    width_cm: int
-    height_cm: int
-
-    @property
-    def ratio(self):
-        return self.width_cm / self.height_cm
-
-
-PORTRAIT = BoardType("Kandelláber", 100, 140)
-BILLBOARD = BoardType("Óriásplakát", 504, 238)
+PORTRAIT = CATEGORIES["Kandeláber"]
+BILLBOARD = CATEGORIES["Óriásplakát"]
 
 
 def line_width(size: tuple[int, int], ratio: float = 0.003) -> int:
@@ -41,16 +30,6 @@ def pixel_points(polygon, size):
     width, height = size
     return [(min(width - 1, max(0, x * width)), min(height - 1, max(0, y * height)))
             for x, y in polygon]
-
-
-def classify_board(points: list[Point]) -> BoardType:
-    """Compare mean opposing edge lengths in pixels, allowing camera roll."""
-    width = (math.dist(points[0], points[1]) + math.dist(points[3], points[2])) / 2
-    height = (math.dist(points[0], points[3]) + math.dist(points[1], points[2])) / 2
-    if min(width, height) <= 0:
-        raise ValueError("A tábla szélessége és magassága nem lehet nulla.")
-    ratio = width / height
-    return min((PORTRAIT, BILLBOARD), key=lambda board: abs(math.log(ratio / board.ratio)))
 
 
 def _solve(matrix, values):
@@ -227,8 +206,10 @@ def _fit_text(draw, text, maximum, text_font):
 
 
 def grid_layout(types, cell_width, card_height, image_width, image_height, gap=14, pad=16):
-    """Choose a compact grid; landscape boards span three portrait-sized columns."""
-    spans = [3 if board == BILLBOARD else 1 for board in types]
+    """Choose a compact grid with enough columns for every category's target ratio."""
+    crop_height = card_height - 94
+    spans = [max(1, math.ceil((round(crop_height * board.ratio) + 2 * pad + gap) / (cell_width + gap)))
+             for board in types]
     candidates = []
     for columns in range(max(spans), min(9, sum(spans)) + 1):
         placements = []
@@ -262,7 +243,8 @@ def compose_export(source: Image.Image, polygons, ratio=0.003, crop_height=320, 
     diameter = max(28, min(64, round(min(source.size) * 0.034)))
     margin = max(40, diameter + width + 10)
     points = [pixel_points(polygon, source.size) for polygon in polygons]
-    types = [classify_board(polygon) for polygon in points]
+    types = [CATEGORIES[getattr(polygon, "category", None) or predict_category(polygon, source.size)]
+             for polygon in polygons]
     image_width, image_height = source.width + 2 * margin, source.height + 2 * margin
     header = 94
     gap, pad = 14, 16
@@ -283,7 +265,8 @@ def compose_export(source: Image.Image, polygons, ratio=0.003, crop_height=320, 
         draw.rectangle((side_x, 7, result.width, result.height), fill="#ffffff")
         draw.line((side_x, 7, side_x, result.height), fill="#d7e1eb", width=1)
         draw.text((side_x + pad, 28), "Táblák közelről", font=font(23, True), fill=INK)
-        draw.text((side_x + pad, 62), f"{len(polygons)} objektum  ·  Becsült típusok", font=font(14), fill=MUTED)
+        subtitle = _fit_text(draw, f"{len(polygons)} objektum  ·  Kategória szerinti nézet", sidebar_width - 2 * pad, font(14))
+        draw.text((side_x + pad, 62), subtitle, font=font(14), fill=MUTED)
 
         # Center the photo vertically when many cards make the sidebar taller.
         photo_y = header + (body_height - image_height) // 2
@@ -302,6 +285,7 @@ def compose_export(source: Image.Image, polygons, ratio=0.003, crop_height=320, 
                 badge(photo_draw, box, i)
             result.paste(photo, (0, photo_y))
 
+        crop_sizes = []
         for i, (polygon, board, placement) in enumerate(zip(points, types, placements), 1):
             row, column, span = placement
             x = side_x + pad + column * (cell_width + gap)
@@ -312,16 +296,20 @@ def compose_export(source: Image.Image, polygons, ratio=0.003, crop_height=320, 
             draw.rounded_rectangle((x, y, x + card_width, y + card_height), radius=12,
                                    fill="#f7f9fc", outline="#dce5ee", width=1)
             badge(draw, (x + 12, y + 12, x + 44, y + 44), i)
-            draw.text((x + 54, y + 11), board.name, font=font(16, True), fill=INK)
-            draw.text((x + 54, y + 33), f"{board.width_cm} × {board.height_cm} cm", font=font(13), fill=MUTED)
+            name = _fit_text(draw, board.name, card_width - 66, font(16, True))
+            draw.text((x + 54, y + 11), name, font=font(16, True), fill=INK)
+            draw.text((x + 54, y + 33), board.size_label, font=font(13), fill=MUTED)
             with rectify_board(clean, polygon, board, crop_height) as crop:
+                crop_sizes.append(crop.size)
                 crop_x, crop_y = x + (card_width - crop.width) // 2, y + 60
                 draw.rectangle((crop_x - 1, crop_y - 1, crop_x + crop.width, crop_y + crop.height), fill="#d1dce6")
                 result.paste(crop, (crop_x, crop_y))
-            footer = _fit_text(draw, "Szemből · egységes magasság", card_width - 24, font(12))
+            provenance = "Kézi kategória" if getattr(polygons[i - 1], "category_source", None) == "manual" else "Automatikus"
+            footer = _fit_text(draw, f"{provenance} · Szemből", card_width - 24, font(12))
             draw.text((x + 12, y + card_height - 25), footer, font=font(12), fill=MUTED)
 
         draw.text((margin, result.height - 29), f"{len(polygons)} tábla  /  Azonos szám = azonos objektum",
                   font=font(13), fill=MUTED)
         result.info["source_origin"] = (margin, photo_y + margin)
+        result.info["crop_sizes"] = crop_sizes
         return result

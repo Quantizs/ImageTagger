@@ -14,6 +14,7 @@ from pathlib import Path
 from statistics import mean
 
 from PIL import Image
+from surface_categories import CATEGORIES, CategorizedPolygon, auto_category
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp", ".gif"}
 Point = tuple[float, float]
@@ -45,15 +46,21 @@ def parse_annotations(text: str) -> list[Polygon]:
     for number, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
+        fields = line.split()
+        if len(fields) not in (8, 10):
+            raise ValueError(f"{number}. sor: 8 koordináta, opcionálisan kategória és auto/manual szükséges.")
         try:
-            values = [float(value) for value in line.split()]
+            values = [float(value) for value in fields[:8]]
         except ValueError as exc:
             raise ValueError(f"{number}. sor: nem szám típusú koordináta.") from exc
-        if len(values) != 8:
-            raise ValueError(f"{number}. sor: pontosan 8 koordináta szükséges.")
         points = list(zip(values[::2], values[1::2]))
         if not valid_polygon(points):
             raise ValueError(f"{number}. sor: hibás, kereszteződő vagy nem konvex négyszög.")
+        if len(fields) == 10:
+            try:
+                points = CategorizedPolygon(points, fields[8], fields[9])
+            except ValueError as exc:
+                raise ValueError(f"{number}. sor: {exc}") from exc
         polygons.append(points)
     return polygons
 
@@ -63,19 +70,31 @@ def serialize_annotations(polygons: list[Polygon]) -> str:
         if not valid_polygon(polygon):
             raise ValueError("Érvénytelen poligon nem menthető.")
     # Round-trip precision also preserves tiny valid objects in very large images.
-    return "".join(" ".join(format(v, ".17g") for point in polygon for v in point) + "\n"
-                   for polygon in polygons)
+    lines = []
+    for polygon in polygons:
+        line = " ".join(format(v, ".17g") for point in polygon for v in point)
+        category = getattr(polygon, "category", None)
+        if category is not None:
+            source = getattr(polygon, "category_source", None)
+            CategorizedPolygon(polygon, category, source)  # Validate metadata before writing.
+            line += f" {category} {source}"
+        lines.append(line + "\n")
+    return "".join(lines)
 
 
 def atomic_write(path: Path, text: str) -> None:
     """Replace one file only after the complete new content is flushed to disk."""
+    atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="",
+        with tempfile.NamedTemporaryFile(mode="wb",
                                          dir=path.parent, prefix=".tmp-", delete=False) as handle:
             temporary = Path(handle.name)
-            handle.write(text)
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
@@ -131,12 +150,36 @@ class AnnotationStore:
             return
         if not record.editable:
             raise ValueError("A hibás kép vagy annotáció nem írható felül.")
-        atomic_write(record.annotation_path, serialize_annotations(record.polygons))
+        text = serialize_annotations(record.polygons)
+        if record.annotation_path.exists() and any(getattr(p, "category", None) for p in record.polygons):
+            backup = self.output_directory / "backups" / (record.annotation_path.name + ".before_categories.bak")
+            if not backup.exists():
+                atomic_write_bytes(backup, record.annotation_path.read_bytes())
+        atomic_write(record.annotation_path, text)
         record.dirty = False
 
     def save_all(self) -> None:
         for record in self.records:
             self.save_record(record)
+
+    def categorize_record(self, record: ImageRecord, dry_run=False) -> dict:
+        if not record.editable:
+            raise ValueError(record.annotation_error or record.image_error)
+        report = {"changed": 0, "manual_preserved": 0, "unchanged": 0}
+        polygons = []
+        for polygon in record.polygons:
+            updated = auto_category(polygon, (record.width, record.height))
+            polygons.append(updated)
+            if getattr(polygon, "category_source", None) == "manual":
+                report["manual_preserved"] += 1
+            elif getattr(polygon, "category", None) != updated.category:
+                report["changed"] += 1
+            else:
+                report["unchanged"] += 1
+        if report["changed"] and not dry_run:
+            record.polygons = polygons
+            record.dirty = True
+        return report
 
     def restore_index(self) -> int:
         path = self.output_directory / "session.json"
@@ -181,6 +224,13 @@ class AnnotationStore:
             "annotated_images": annotated,
             "images_without_annotations": len(self.records) - annotated,
             "total_objects": objects,
+            "objects_per_category": {name: sum(getattr(p, "category", None) == name
+                                               for r in self.records for p in r.polygons)
+                                     for name in CATEGORIES},
+            "objects_without_category": sum(getattr(p, "category", None) is None
+                                            for r in self.records for p in r.polygons),
+            "manually_categorized_objects": sum(getattr(p, "category_source", None) == "manual"
+                                                for r in self.records for p in r.polygons),
             "mean_object_area_px2": mean(areas) if areas else 0,
             "min_object_area_px2": min(areas, default=0),
             "max_object_area_px2": max(areas, default=0),

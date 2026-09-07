@@ -2,6 +2,7 @@ import math
 import unittest
 
 from PIL import Image, ImageDraw
+from surface_categories import CategorizedPolygon
 
 from export_layout import (
     BILLBOARD, PORTRAIT, BLUE, RED, GREEN, classify_board, compose_export,
@@ -80,7 +81,7 @@ class LayoutTests(unittest.TestCase):
                     compose_export(source, [[(0, 0), (1, 0), (1, 1), (0, 1)]], crop_height=height)
 
     def test_many_billboards_use_multiple_columns_instead_of_a_tall_strip(self):
-        polygons = [[(0.1, 0.1), (0.5, 0.1), (0.5, 0.3), (0.1, 0.3)]] * 9
+        polygons = [CategorizedPolygon([(0.1, 0.1), (0.5, 0.1), (0.5, 0.3), (0.1, 0.3)], "Óriásplakát", "manual")] * 9
         with Image.new("RGB", (1280, 766), "white") as source:
             with compose_export(source, polygons) as result:
                 self.assertLess(result.height, 2000)

@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 from annotation_store import AnnotationStore, ImageRecord, Polygon, polygon_area, valid_polygon
+from surface_categories import CATEGORIES, CategorizedPolygon, auto_category, edited_polygon
 
 
 class ImageTagger:
@@ -36,7 +37,7 @@ class ImageTagger:
         self.save_message = "Válassz egy képmappát a kezdéshez."
         self.root.title("Image Tagger – poligon annotáció")
         self.root.geometry("1280x850")
-        self.root.minsize(940, 600)
+        self.root.minsize(1000, 700)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._build_ui()
         self._bind_events()
@@ -68,19 +69,42 @@ class ImageTagger:
         body.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(body, background="#18212d", highlightthickness=0, cursor="crosshair")
         self.canvas.pack(side="left", fill="both", expand=True)
-        sidebar = ttk.Frame(body, padding=(12, 8, 4, 4), width=240)
-        sidebar.pack(side="right", fill="y")
-        sidebar.pack_propagate(False)
+        side_container = ttk.Frame(body, padding=(12, 8, 4, 4), width=300)
+        side_container.pack(side="right", fill="y")
+        side_container.pack_propagate(False)
+        tabs = ttk.Notebook(side_container)
+        tabs.pack(fill="both", expand=True)
+        sidebar, help_panel = ttk.Frame(tabs, padding=8), ttk.Frame(tabs, padding=8)
+        tabs.add(sidebar, text="Objektumok")
+        tabs.add(help_panel, text="Súgó")
         ttk.Label(sidebar, text="Objektumok ezen a képen", font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        self.object_list = tk.Listbox(sidebar, exportselection=False, height=13,
+        self.object_list = tk.Listbox(sidebar, exportselection=False, height=8,
                                      font=("Segoe UI", 10), activestyle="none")
         self.object_list.pack(fill="x", pady=8)
         self.object_list.bind("<<ListboxSelect>>", self.list_selection)
+        ttk.Label(sidebar, text="Kijelölt objektum kategóriája").pack(anchor="w", pady=(4, 4))
+        self.category_var = tk.StringVar()
+        self.category_combo = ttk.Combobox(sidebar, textvariable=self.category_var,
+                                           values=list(CATEGORIES), state="disabled")
+        self.category_combo.pack(fill="x")
+        self.category_combo.bind("<<ComboboxSelected>>", self.set_manual_category)
+        self.category_info = tk.StringVar(value="Jelölj ki egy objektumot.")
+        ttk.Label(sidebar, textvariable=self.category_info, wraplength=246,
+                  foreground="#1b6394").pack(anchor="w", pady=6)
+        self.manual_category_button = ttk.Button(sidebar, text="Rögzítés kéziként",
+                                                 command=self.set_manual_category, state="disabled")
+        self.manual_category_button.pack(fill="x")
+        self.auto_category_button = ttk.Button(sidebar, text="Vissza automatikusra",
+                                               command=self.reset_auto_category, state="disabled")
+        self.auto_category_button.pack(fill="x", pady=(3, 10))
         ttk.Button(sidebar, text="Kijelölt törlése (Delete)", command=self.delete_selected).pack(fill="x")
         ttk.Button(sidebar, text="Visszavonás (Ctrl+Z)", command=self.undo).pack(fill="x", pady=(8, 3))
         ttk.Button(sidebar, text="Újra (Ctrl+Y)", command=self.redo).pack(fill="x")
-        ttk.Separator(sidebar).pack(fill="x", pady=14)
-        ttk.Label(sidebar, text=(
+        ttk.Separator(sidebar).pack(fill="x", pady=12)
+        ttk.Button(sidebar, text="Mappa automatikus kategorizálása",
+                   command=self.categorize_folder).pack(fill="x")
+        ttk.Label(sidebar, text="A kézi kategóriákat megőrzi.", foreground="#61758a").pack(anchor="w", pady=5)
+        ttk.Label(help_panel, text=(
             "Húzás üres helyen: új téglalap.\n\n"
             "Kattintás a poligonra: kijelölés.\n"
             "Sarok húzása: alak módosítása.\n"
@@ -96,7 +120,7 @@ class ImageTagger:
             "A módosítások automatikusan\nmentésre kerülnek."
         ), justify="left", wraplength=215).pack(anchor="w")
         self.mode_var = tk.StringVar(value="Kijelölés / rajzolás üres helyen")
-        ttk.Label(sidebar, textvariable=self.mode_var, wraplength=210,
+        ttk.Label(help_panel, textvariable=self.mode_var, wraplength=246,
                   foreground="#1b6394").pack(anchor="w", pady=12)
         self.count_var = tk.StringVar(value="Összes kép: 0  |  Annotált kép: 0  |  Objektum: 0")
         ttk.Label(self.root, textvariable=self.count_var, padding=(12, 6)).pack(anchor="w")
@@ -112,7 +136,7 @@ class ImageTagger:
             "<Control-s>": self.save_now, "<Escape>": self.cancel_drag,
             "n": self.draw_mode, "v": self.select_mode, "f": self.fit_image,
         }.items():
-            self.root.bind(key, lambda event, action=callback: self.key_action(action))
+            self.root.bind(key, lambda event, action=callback: self.key_action(action, event))
         self.canvas.bind("<ButtonPress-1>", self.mouse_down)
         self.canvas.bind("<B1-Motion>", self.mouse_move)
         self.canvas.bind("<ButtonRelease-1>", self.mouse_up)
@@ -125,7 +149,9 @@ class ImageTagger:
         self.canvas.bind("<Configure>", self.on_resize)
 
     @staticmethod
-    def key_action(action):
+    def key_action(action, event=None):
+        if event is not None and isinstance(event.widget, ttk.Combobox):
+            return
         action()
         return "break"
 
@@ -207,10 +233,70 @@ class ImageTagger:
         if record:
             for i, polygon in enumerate(record.polygons):
                 area = polygon_area(polygon) * record.width * record.height
-                self.object_list.insert("end", f"{i + 1}. négyszög  ·  {area:,.0f} px²")
+                name = getattr(polygon, "category", "Nincs kategória")
+                self.object_list.insert("end", f"{i + 1}. {name}  ·  {area:,.0f} px²")
         if self.selected is not None:
             self.object_list.selection_set(self.selected)
             self.object_list.see(self.selected)
+        self.refresh_category()
+
+    def refresh_category(self):
+        if self.record and self.selected is not None and self.selected < len(self.record.polygons):
+            polygon = self.record.polygons[self.selected]
+            self.category_var.set(getattr(polygon, "category", ""))
+            source = getattr(polygon, "category_source", None)
+            self.category_info.set({"manual": "Kézzel rögzített • automatikusan nem változik.",
+                                    "auto": "Automatikus javaslat • szükség esetén javítsd."}.get(
+                                        source, "Régi annotáció • még nincs kategóriája."))
+            enabled = self.record.editable
+        else:
+            self.category_var.set("")
+            self.category_info.set("Jelölj ki egy objektumot.")
+            enabled = False
+        self.category_combo.configure(state="readonly" if enabled else "disabled")
+        for button in (self.manual_category_button, self.auto_category_button):
+            button.configure(state="normal" if enabled else "disabled")
+
+    def set_manual_category(self, event=None):
+        category = self.category_var.get()
+        self.finish_drag()
+        if not self.record or not self.record.editable or self.selected is None or category not in CATEGORIES:
+            return
+        self.remember(copy.deepcopy(self.record.polygons))
+        self.record.polygons[self.selected] = CategorizedPolygon(self.record.polygons[self.selected], category, "manual")
+        self.changed()
+        self.canvas.focus_set()
+
+    def reset_auto_category(self):
+        self.finish_drag()
+        if not self.record or not self.record.editable or self.selected is None:
+            return
+        self.remember(copy.deepcopy(self.record.polygons))
+        # Explicit opt-in to discard a manual choice and return to automatic updates.
+        self.record.polygons[self.selected] = auto_category(list(self.record.polygons[self.selected]),
+                                                           (self.record.width, self.record.height))
+        self.changed()
+        self.canvas.focus_set()
+
+    def categorize_folder(self):
+        self.finish_drag()
+        if not self.store or not self.persist():
+            return
+        changed = manual = errors = 0
+        for record in self.store.records:
+            if not record.editable:
+                errors += 1
+                continue
+            before = copy.deepcopy(record.polygons)
+            counts = self.store.categorize_record(record)
+            if counts["changed"]:
+                self.remember(before, record.path)
+            changed += counts["changed"]
+            manual += counts["manual_preserved"]
+        self.refresh_list()
+        if self.persist(include_statistics=True):
+            messagebox.showinfo("Kategorizálás kész", f"Módosított objektum: {changed}\nMegőrzött kézi kategória: {manual}"
+                                f"\nHiba miatt kihagyott kép: {errors}", parent=self.root)
 
     def list_selection(self, event=None):
         selection = self.object_list.curselection()
@@ -218,6 +304,7 @@ class ImageTagger:
             self.finish_drag()
             self.selected = selection[0]
             self.select_mode()
+            self.refresh_category()
             self.draw_overlays()
 
     def screen_point(self, point):
@@ -377,7 +464,9 @@ class ImageTagger:
                 polygon = [(max(0, min(1, x + dx)), max(0, min(1, y + dy))) for x, y in polygon]
             if valid_polygon(polygon) and polygon_area(polygon) * record.width * record.height >= 1:
                 if record.polygons[self.selected] != polygon:
-                    record.polygons[self.selected] = polygon
+                    record.polygons[self.selected] = edited_polygon(self.drag["before"][self.selected], polygon,
+                                                                    (record.width, record.height))
+                    self.refresh_category()
                     self.mark_dirty()
             else:
                 self.save_message = "A sarkok nem keresztezhetik egymást; az objektum legalább 1 px² legyen."
@@ -389,11 +478,12 @@ class ImageTagger:
             self.mouse_move(event)
             self.finish_drag()
 
-    def remember(self, before):
-        stack = self.undo_stacks.setdefault(self.record.path, [])
+    def remember(self, before, path=None):
+        path = path if path is not None else self.record.path
+        stack = self.undo_stacks.setdefault(path, [])
         stack.append(before)
         del stack[:-100]
-        self.redo_stacks[self.record.path] = []
+        self.redo_stacks[path] = []
 
     def finish_drag(self):
         if not self.drag:
@@ -406,7 +496,7 @@ class ImageTagger:
             if (valid_polygon(polygon) and polygon_area(polygon) * record.width * record.height >= 1
                     and (polygon[1][0] - polygon[0][0]) * record.width * self.scale >= 3
                     and (polygon[3][1] - polygon[0][1]) * record.height * self.scale >= 3):
-                record.polygons.append(polygon)
+                record.polygons.append(auto_category(polygon, (record.width, record.height)))
                 self.selected = len(record.polygons) - 1
                 self.mark_dirty()
                 self.select_mode()
@@ -509,10 +599,16 @@ class ImageTagger:
         if not self.store or not self.persist(include_statistics=True):
             return
         stats, _ = self.store.statistics()
+        category_counts = "\n".join(
+            f"{name}: {stats['objects_per_category'][name]}" for name in CATEGORIES
+        )
         messagebox.showinfo("Statisztika – fájlba mentve", (
             f"Összes kép: {stats['total_images']}\n"
             f"Annotált kép: {stats['annotated_images']}\n"
             f"Annotált objektum: {stats['total_objects']}\n\n"
+            "Objektumok kategóriánként:\n"
+            f"{category_counts}\n"
+            f"Kategória nélkül: {stats['objects_without_category']}\n\n"
             f"Átlagos objektumterület: {stats['mean_object_area_px2']:,.2f} px²\n"
             f"Átlagos darabszám / összes kép: {stats['mean_objects_per_image']:.2f}\n"
             f"Átlagos darabszám / annotált kép: {stats['mean_objects_per_annotated_image']:.2f}\n"

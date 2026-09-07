@@ -56,7 +56,7 @@ class GuiTests(unittest.TestCase):
         self.app.mouse_move(self.event((0.4, 0.25)))
         self.app.mouse_up(self.event((0.4, 0.25)))
         self.assertAlmostEqual(self.app.record.polygons[1][0][0], 0.4)
-        saved = parse_annotations(self.app.record.annotation_path.read_text())
+        saved = parse_annotations(self.app.record.annotation_path.read_text(encoding="utf-8"))
         self.assertEqual(saved, self.app.record.polygons)
         self.root.event_generate("<Right>")
         self.root.update()
@@ -123,6 +123,59 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(self.app.record.dirty)
         self.assertEqual(len(self.app.record.polygons), 1)
         self.assertIn("MENTÉSI HIBA", self.app.status_var.get())
+
+    def test_new_object_gets_auto_category_and_manual_selection_persists_through_edits(self):
+        self.draw((0.1, 0.1), (0.225, 0.1 + 140 / 600))
+        polygon = self.app.record.polygons[0]
+        self.assertEqual((polygon.category, polygon.category_source), ("Kandeláber", "auto"))
+        self.app.category_var.set("Citylight")
+        self.app.category_combo.event_generate("<<ComboboxSelected>>")
+        self.root.update()
+        self.assertEqual(self.app.record.polygons[0].category_source, "manual")
+        self.app.mouse_down(self.event((0.1, 0.1)))
+        self.app.mouse_up(self.event((0.08, 0.08)))
+        self.app.mouse_down(self.event((0.16, 0.2)))
+        self.app.mouse_up(self.event((0.3, 0.3)))
+        loaded = AnnotationStore(self.directory).records[0].polygons[0]
+        self.assertEqual((loaded.category, loaded.category_source), ("Citylight", "manual"))
+        self.app.navigate(1)
+        self.app.navigate(-1)
+        self.assertEqual(self.app.record.polygons[0].category, "Citylight")
+
+    def test_manual_category_and_reset_to_auto_are_undoable(self):
+        self.draw()
+        automatic = self.app.record.polygons[0].category
+        self.app.category_var.set("BKV_álló")
+        self.app.set_manual_category()
+        self.app.undo()
+        self.assertEqual(self.app.record.polygons[0].category, automatic)
+        self.assertEqual(self.app.record.polygons[0].category_source, "auto")
+        self.app.redo()
+        self.assertEqual(self.app.record.polygons[0].category, "BKV_álló")
+        self.app.selected = 0
+        self.app.reset_auto_category()
+        self.assertEqual(self.app.record.polygons[0].category, automatic)
+        self.app.undo()
+        self.assertEqual(self.app.record.polygons[0].category_source, "manual")
+
+    def test_folder_categorization_protects_even_manual_confirmation_of_same_value(self):
+        self.draw()
+        self.app.set_manual_category()
+        self.app.record.polygons.append([(0.1, 0.1), (0.9, 0.1), (0.9, 0.4), (0.1, 0.4)])
+        self.app.changed()
+        with patch("image_tagger.messagebox.showinfo"):
+            self.app.categorize_folder()
+        loaded = AnnotationStore(self.directory).records[0].polygons
+        self.assertEqual(loaded[0].category_source, "manual")
+        self.assertEqual(loaded[1].category_source, "auto")
+
+    def test_category_selector_arrows_do_not_navigate_images(self):
+        self.draw()
+        self.app.category_combo.focus_force()
+        self.root.update()
+        self.app.category_combo.event_generate("<Right>")
+        self.root.update()
+        self.assertEqual(self.app.index, 0)
 
 
 if __name__ == "__main__":
