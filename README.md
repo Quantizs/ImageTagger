@@ -197,6 +197,18 @@ rajzolt másolatot. A kép mellett számozott oldalsávban mutatja a reklámtáb
 perspektívakorrekcióval szembeforgatott, egységes méretű nézeteit.
 Az eredeti képeket és az annotációkat nem módosítja.
 
+Az export alapértelmezés szerint **Ultralytics YOLO11l** ember- és járműfelismerést is futtat.
+Ehhez a külön exportfüggőségek szükségesek. Windows alatt egy helyi környezetben telepíthetők:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-export.txt
+.\export_images.cmd budapest_kozut
+```
+
+Az `export_images.cmd` automatikusan a projekt `.venv` környezetét használja, ha az létezik.
+Aktivált környezetben vagy az exportfüggőségekkel rendelkező Pythonból közvetlenül is indítható:
+
 ```powershell
 python export_polygons.py "C:\Projects\ImageTagger\budapest_kozut"
 ```
@@ -250,7 +262,58 @@ python export_polygons.py "C:\Projects\ImageTagger\budapest_kozut" --crop-height
   fájlokat használja, mint az annotátor. Almappákat nem jár be, többképes fájlból az első képet exportálja.
 
 A korábbi piros keretes exportok ugyanazzal a paranccsal újragenerálhatók az új megjelenéssel.
-Az export továbbra is csak a Pillow csomagot igényli; nincs szükség OpenCV-re.
+Detektálás nélkül, a korábbi működéshez csak a Pillow szükséges:
+
+```powershell
+python export_polygons.py budapest_kozut --no-detection
+```
+
+### Emberek és járművek felismerése
+
+- Az alapmodell a hivatalos **`yolo11l.pt`** detektor, amely az első futtatáskor a
+  `models` mappába töltődik le. Utána helyből tölti be, futtatásonként egyszer;
+  a képeket egyenként dolgozza fel. A felismerés helyben történik.
+  Modellleírás: [Ultralytics YOLO11](https://docs.ultralytics.com/models/yolo11/).
+- **Piros kör + fehér sorszám** jelöli a `person` találatokat.
+  **Kék kör + fehér sorszám** jelöli a járműveket: `bicycle`, `car`, `motorcycle`,
+  `bus`, `train`, `truck` (kerékpár, autó, motor, busz, vonat, teherautó).
+  Ezek a [COCO osztálynevek](https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml)
+  szerinti csoportok; repülőgép és hajó nem tartozik a járműszámlálóba.
+- A kör a detektált bounding box **középpontjára** kerül. A sugár a rövidebb képoldal
+  1,4%-a, minimum 12, maximum 40 pixel; például 1920×1080 képnél 15 pixel.
+  A kör mérete nem követi a bounding box méretét. A kontrasztos fehér perem és a
+  körhöz méretezett félkövér szám az olvashatóságot segíti. Sűrű találatok körei átfedhetnek.
+- A számozás **képenként és csoportonként 1-től indul**, fentről lefelé, balról jobbra.
+  A reklámtáblák külön, a megszokott sötét négyszögben számozódnak.
+- Az oldalsáv tetején nagy **PEOPLE** és **VEHICLE** számláló mutatja az adott képen
+  detektált darabszámot. Nulla találat esetén is megjelenik a 0.
+- A felismerés a mappa **minden beolvasható képén** lefut, üres vagy hiányzó annotáció
+  esetén is. A korábbi exportszűrés megmarad: **csak a reklámpoligonnal rendelkező képekből
+  készül outputkép**. A futás végi terminálösszesítés az összes feldolgozott képre vonatkozik;
+  ez több képen ugyanazt a személyt/járművet többször is tartalmazhatja, nem követés.
+- A reklámkivágások a tiszta képből készülnek; az új körök és sorszámok nem kerülnek rájuk.
+  Az annotációs TXT-k és az annotátor statisztikái nem változnak a detektálás miatt.
+- Modellbetöltési vagy felismerési hiba esetén a futás hibával leáll; nem tüntet fel
+  félrevezető nulla darabszámot. A korábbi exportokat ilyen hiba miatt nem törli.
+- A számok modellbecslések: távoli, takart objektumok kimaradhatnak, téves találatok is
+  előfordulhatnak, például plakáton szereplő alakoknál. Képenként legfeljebb 1000 találatot kér a modelltől.
+
+Beállítások példákkal:
+
+```powershell
+.\export_images.cmd budapest_kozut --confidence 0.35 --imgsz 1280
+.\export_images.cmd budapest_kozut --device cpu
+.\export_images.cmd budapest_kozut --device 0
+.\export_images.cmd budapest_kozut --weights "C:\modellek\yolo11l.pt"
+```
+
+A `--confidence` alapértéke 0,25; emelése kevesebb, megbízhatóbbnak ítélt találatot hagy meg.
+A `--imgsz` alapértéke 1280; a kisebb, például 640-es érték gyorsabb lehet, de az apró
+objektumok felismerése romolhat. A `--device cpu` processzort, a `--device 0` az első,
+PyTorch által támogatott CUDA GPU-t választja; utóbbihoz megfelelő CUDA-s PyTorch-telepítés kell.
+Alapból az Ultralytics választ az elérhető eszközökből. A csomag beállításai alapértelmezés
+szerint a projekt `.ultralytics` mappájába kerülnek, a meglévő `YOLO_CONFIG_DIR` beállítást tiszteletben tartja.
+Paraméterek: [Ultralytics Predict dokumentáció](https://docs.ultralytics.com/modes/predict/).
 
 ## Ellenőrzés
 

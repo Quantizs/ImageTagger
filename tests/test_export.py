@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch, Mock
 
 from PIL import Image
 
@@ -15,6 +16,11 @@ POLYGONS = [
 
 class ExportTests(unittest.TestCase):
     def setUp(self):
+        self.detector = Mock()
+        self.detector.detect.return_value = []
+        detector_patch = patch("export_polygons.YoloSceneDetector", return_value=self.detector)
+        self.addCleanup(detector_patch.stop)
+        self.detector_factory = detector_patch.start()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)

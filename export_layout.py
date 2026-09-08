@@ -7,6 +7,7 @@ from functools import lru_cache
 
 from PIL import Image, ImageDraw, ImageFont
 from surface_categories import BoardType, CATEGORIES, classify_board, predict_category
+from scene_detection import detection_counts
 
 BLUE = (0, 80, 255)
 RED = (255, 30, 35)
@@ -14,6 +15,8 @@ GREEN = (0, 220, 70)
 INK = "#152d46"
 MUTED = "#61758a"
 PAPER = "#f0f4f8"
+PEOPLE_COLOR = "#df263b"
+VEHICLE_COLOR = "#1769dc"
 Point = tuple[float, float]
 
 
@@ -146,7 +149,7 @@ def nearest_boundary(point: Point, polygon: list[Point]) -> Point:
     return min(candidates, key=lambda candidate: math.dist(point, candidate))
 
 
-def place_badges(polygons: list[list[Point]], size: tuple[int, int], diameter: int, gap: int):
+def place_badges(polygons: list[list[Point]], size: tuple[int, int], diameter: int, gap: int, obstacles=()):
     """Prefer nearby external labels, minimizing overlap with all boards and labels."""
     placed = []
     for polygon in polygons:
@@ -167,6 +170,7 @@ def place_badges(polygons: list[list[Point]], size: tuple[int, int], diameter: i
 
         def score(box):
             object_overlap = sum(polygon_rect_overlap(other, box) for other in polygons)
+            object_overlap += sum(rect_overlap(other, box) for other in obstacles)
             label_overlap = sum(rect_overlap(other, box) for other in placed)
             center = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
             distance = math.dist(center, nearest_boundary(center, polygon))
@@ -195,6 +199,46 @@ def badge(draw, box, number):
     size = round(diameter * (0.5 if number < 100 else 0.37))
     draw.text(((box[0] + box[2]) / 2, (box[1] + box[3]) / 2 - 1), str(number),
               font=font(size, True), fill="white", anchor="mm")
+
+
+def detection_radius(size):
+    return max(12, min(40, round(min(size) * 0.014)))
+
+
+def draw_detections(image, detections, source_size, offset=(0, 0)):
+    """Small, numbered circles at box centers, with independent group numbering."""
+    draw = ImageDraw.Draw(image)
+    radius = detection_radius(source_size)
+    numbers = {"person": 0, "vehicle": 0}
+    for item in sorted(detections, key=lambda d: (d.kind, d.center[1], d.center[0])):
+        numbers[item.kind] += 1
+        label = str(numbers[item.kind])
+        x, y = item.center[0] + offset[0], item.center[1] + offset[1]
+        color = PEOPLE_COLOR if item.kind == "person" else VEHICLE_COLOR
+        draw.ellipse((x - radius - 2, y - radius - 2, x + radius + 2, y + radius + 2),
+                     fill="white", outline=INK, width=1)
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
+        text_size = round(radius * 1.12)
+        while text_size > 8 and draw.textlength(label, font=font(text_size, True)) > 2 * radius - 5:
+            text_size -= 1
+        draw.text((x, y - 1), label, font=font(text_size, True), fill="white", anchor="mm")
+
+
+def draw_detection_counts(draw, x, sidebar_width, detections, pad=16):
+    counts = detection_counts(detections)
+    gap = 14
+    card_width = (sidebar_width - 2 * pad - gap) // 2
+    for i, (label, count, color, background) in enumerate((
+        ("PEOPLE", counts["people"], PEOPLE_COLOR, "#fff0f2"),
+        ("VEHICLE", counts["vehicles"], VEHICLE_COLOR, "#edf4ff"),
+    )):
+        left = x + pad + i * (card_width + gap)
+        draw.rounded_rectangle((left, 88, left + card_width, 180), radius=12, fill=background)
+        draw.text((left + 12, 98), label, font=font(16, True), fill=color)
+        size = 38
+        while size > 12 and draw.textlength(str(count), font=font(size, True)) > card_width - 24:
+            size -= 1
+        draw.text((left + 12, 122), str(count), font=font(size, True), fill=color)
 
 
 def _fit_text(draw, text, maximum, text_font):
@@ -233,7 +277,7 @@ def grid_layout(types, cell_width, card_height, image_width, image_height, gap=1
     return columns, placements, rows
 
 
-def compose_export(source: Image.Image, polygons, ratio=0.003, crop_height=320, title="") -> Image.Image:
+def compose_export(source: Image.Image, polygons, ratio=0.003, crop_height=320, title="", detections=None) -> Image.Image:
     """Original-resolution photo at left; a grid of unmarked, rectified crops at right."""
     if not polygons:
         raise ValueError("Legalább egy poligon szükséges az exporthoz.")
@@ -246,7 +290,7 @@ def compose_export(source: Image.Image, polygons, ratio=0.003, crop_height=320, 
     types = [CATEGORIES[getattr(polygon, "category", None) or predict_category(polygon, source.size)]
              for polygon in polygons]
     image_width, image_height = source.width + 2 * margin, source.height + 2 * margin
-    header = 94
+    header = 196 if detections is not None else 94
     gap, pad = 14, 16
     cell_width = max(190, round(crop_height * PORTRAIT.ratio) + 2 * pad)
     card_height = crop_height + 94
@@ -267,13 +311,19 @@ def compose_export(source: Image.Image, polygons, ratio=0.003, crop_height=320, 
         draw.text((side_x + pad, 28), "Táblák közelről", font=font(23, True), fill=INK)
         subtitle = _fit_text(draw, f"{len(polygons)} objektum  ·  Kategória szerinti nézet", sidebar_width - 2 * pad, font(14))
         draw.text((side_x + pad, 62), subtitle, font=font(14), fill=MUTED)
+        if detections is not None:
+            draw_detection_counts(draw, side_x, sidebar_width, detections)
 
         # Center the photo vertically when many cards make the sidebar taller.
         photo_y = header + (body_height - image_height) // 2
         with Image.new("RGB", (image_width, image_height), PAPER) as photo:
             photo.paste(clean, (margin, margin))
             shifted = [[(x + margin, y + margin) for x, y in polygon] for polygon in points]
-            boxes = place_badges(shifted, photo.size, diameter, width + 7)
+            radius = detection_radius(source.size) + 3
+            obstacles = [(d.center[0] + margin - radius, d.center[1] + margin - radius,
+                          d.center[0] + margin + radius, d.center[1] + margin + radius)
+                         for d in (detections or [])]
+            boxes = place_badges(shifted, photo.size, diameter, width + 7, obstacles)
             photo_draw = ImageDraw.Draw(photo)
             for polygon, box in zip(shifted, boxes):
                 center = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
@@ -281,6 +331,8 @@ def compose_export(source: Image.Image, polygons, ratio=0.003, crop_height=320, 
                 photo_draw.line((center, target), fill="white", width=4)
                 photo_draw.line((center, target), fill=INK, width=2)
             draw_frames(photo, shifted, width)
+            if detections is not None:
+                draw_detections(photo, detections, source.size, (margin, margin))
             for i, box in enumerate(boxes, 1):
                 badge(photo_draw, box, i)
             result.paste(photo, (0, photo_y))
@@ -312,4 +364,6 @@ def compose_export(source: Image.Image, polygons, ratio=0.003, crop_height=320, 
                   font=font(13), fill=MUTED)
         result.info["source_origin"] = (margin, photo_y + margin)
         result.info["crop_sizes"] = crop_sizes
+        if detections is not None:
+            result.info["detection_counts"] = detection_counts(detections)
         return result

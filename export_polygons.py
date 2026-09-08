@@ -14,6 +14,7 @@ from PIL import Image
 
 from annotation_store import IMAGE_EXTENSIONS, atomic_write, parse_annotations
 from export_layout import compose_export as draw_polygons, line_width
+from scene_detection import DEFAULT_WEIGHTS, YoloSceneDetector, detection_counts
 
 MANIFEST = ".polygon_export.json"
 
@@ -32,7 +33,9 @@ def save_png(image: Image.Image, destination: Path) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def export_images(directory: Path, output: Path | None = None, ratio: float = 0.003, crop_height: int = 320) -> dict:
+def export_images(directory: Path, output: Path | None = None, ratio: float = 0.003, crop_height: int = 320,
+                  *, detect_scene=True, detector=None, weights=DEFAULT_WEIGHTS, confidence=0.25,
+                  image_size=1280, device=None, progress=None) -> dict:
     directory = Path(directory).expanduser().resolve()
     output = (Path(output).expanduser() if output is not None else directory / "output").resolve()
     if not directory.is_dir():
@@ -64,6 +67,9 @@ def export_images(directory: Path, output: Path | None = None, ratio: float = 0.
         unknown = [path.name for path in output.iterdir() if path.name not in previous | {MANIFEST}]
         if unknown:
             raise ValueError("Az output mappa más fájlokat is tartalmaz. Válassz üres vagy korábban ezzel a scripttel létrehozott mappát.")
+    # Initialize once before touching previous exports; a load failure must not erase them.
+    if detect_scene and detector is None:
+        detector = YoloSceneDetector(weights, confidence, image_size, device)
     output.mkdir(parents=True, exist_ok=True)
     # Keep an ownership record even if the process is interrupted during export.
     def remember(names):
@@ -72,23 +78,33 @@ def export_images(directory: Path, output: Path | None = None, ratio: float = 0.
 
     remember(previous)
     exported = set()
-    report = {"exported_images": 0, "polygons": 0, "skipped_images": 0, "errors": [], "output": str(output)}
-    for path in sorted(directory.iterdir(), key=lambda item: item.name.casefold()):
-        if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
-            continue
+    report = {"exported_images": 0, "polygons": 0, "skipped_images": 0, "errors": [], "output": str(output),
+              "detected_images": 0, "people": 0, "vehicles": 0}
+    paths = sorted((path for path in directory.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS),
+                   key=lambda item: item.name.casefold())
+    for index, path in enumerate(paths, 1):
+        if progress is not None:
+            progress(f"[{index}/{len(paths)}] {path.name}")
         annotation = annotations / (path.name + ".txt")
         try:
-            if not annotation.exists():
-                report["skipped_images"] += 1
-                continue
-            polygons = parse_annotations(annotation.read_text(encoding="utf-8-sig"))
-            if not polygons:
-                report["skipped_images"] += 1
-                continue
-            # Full source filename prevents collisions between e.g. photo.jpg and photo.png.
-            name = path.name + ".png"
-            with Image.open(path) as source:
-                with draw_polygons(source, polygons, ratio, crop_height, title=path.name) as rendered:
+            with Image.open(path) as raw, raw.convert("RGB") as source:
+                source.info.clear()
+                detections = detector.detect(source) if detect_scene else None
+                if detections is not None:
+                    counts = detection_counts(detections)
+                    report["detected_images"] += 1
+                    report["people"] += counts["people"]
+                    report["vehicles"] += counts["vehicles"]
+                if not annotation.exists():
+                    report["skipped_images"] += 1
+                    continue
+                polygons = parse_annotations(annotation.read_text(encoding="utf-8-sig"))
+                if not polygons:
+                    report["skipped_images"] += 1
+                    continue
+                # Full source filename prevents collisions between e.g. photo.jpg and photo.png.
+                name = path.name + ".png"
+                with draw_polygons(source, polygons, ratio, crop_height, title=path.name, detections=detections) as rendered:
                     remember(previous | exported | {name})
                     save_png(rendered, output / name)
             exported.add(name)
@@ -111,15 +127,25 @@ def main() -> int:
                         help="Egy színsáv vastagsága a rövidebb képoldal arányában (alapérték: 0.003)")
     parser.add_argument("--crop-height", type=int, default=320,
                         help="Az oldalsáv kivágásainak egységes magassága pixelben (120–1600; alapérték: 320)")
+    parser.add_argument("--no-detection", action="store_true", help="Export ember- és járműfelismerés nélkül")
+    parser.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS, help="A YOLO11l .pt modell helye")
+    parser.add_argument("--confidence", type=float, default=0.25, help="Detektálási küszöb (alapérték: 0.25)")
+    parser.add_argument("--imgsz", type=int, default=1280, help="YOLO bemeneti képméret (alapérték: 1280)")
+    parser.add_argument("--device", default=None, help="Futtatás helye, például cpu vagy 0 (GPU); alapból automatikus")
     args = parser.parse_args()
     try:
-        report = export_images(args.directory, args.output, args.line_ratio, args.crop_height)
-    except (OSError, ValueError) as exc:
+        report = export_images(args.directory, args.output, args.line_ratio, args.crop_height,
+                               detect_scene=not args.no_detection, weights=args.weights, confidence=args.confidence,
+                               image_size=args.imgsz, device=args.device, progress=lambda text: print(text, flush=True))
+    except (OSError, ValueError, RuntimeError) as exc:
         print(f"Hiba: {exc}", file=sys.stderr)
         return 1
     print(f"Exportált kép: {report['exported_images']} | Poligon: {report['polygons']} | "
           f"Annotáció nélkül kihagyva: {report['skipped_images']} | Hibás: {len(report['errors'])}")
     print(f"Kimenet: {report['output']}")
+    if not args.no_detection:
+        print(f"Felismert képek: {report['detected_images']} | People: {report['people']} | Vehicle: {report['vehicles']} "
+              "(összes feldolgozott kép)")
     for error in report["errors"]:
         print(f"Hiba: {error}", file=sys.stderr)
     return 1 if report["errors"] else 0

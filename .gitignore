@@ -1,6 +1,9 @@
 __pycache__/
 .venv/
+models/*.pt
+.ultralytics/
 annotations/
 budapest_kozut/
 utinform/
 export_previews/
+utinform_small/
